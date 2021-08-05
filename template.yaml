@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sam-validation-list
+
+  Sample SAM Template for sam-validation-list
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  
+  FilesInQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 300
+      QueueName: !Sub '${AWS::StackName}-queue'
+      
+  MyFiles:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-files'
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: ".csv"
+            Queue: !GetAtt FilesInQueue.Arn
+      
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: "s3.amazonaws.com"
+            Action:
+              - 'SQS:SendMessage'
+            Resource: !GetAtt FilesInQueue.Arn
+      Queues:
+        - !Ref FilesInQueue
+
+  ListValidationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: code/black_lists/
+      Handler: lists_validation.lambda_handler
+      Runtime: python3.8
+      Tracing: Active
+      Environment:
+        Variables:
+          TABLE_JOBS: !Ref Jobs
+          TABLE_BLACK_LIST: !Ref BlackList
+      Timeout: 300
+      MemorySize: 1024
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Jobs
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlackList
+        - AWSLambdaExecute
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:GetObjectACL
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-files/*'
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FilesInQueue.Arn
+            BatchSize: 5
+
+  ProcessJobsStatus:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: code/notifications/
+      Handler: change_process_status.lambda_handler
+      Runtime: python3.8
+      Tracing: Active
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_JOBS: !Ref Jobs
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Jobs
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt Jobs.StreamArn
+            BatchSize: 100
+            StartingPosition: TRIM_HORIZON
+
+  Jobs:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: "job_id"
+        AttributeType: "S"
+      KeySchema:
+      - AttributeName: "job_id"
+        KeyType: "HASH"
+      BillingMode: "PAY_PER_REQUEST"
+      SSESpecification:
+        SSEEnabled: True
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+        
+  BlackList:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: "number"
+        AttributeType: "S"
+      KeySchema:
+      - AttributeName: "number"
+        KeyType: "HASH"
+      BillingMode: "PAY_PER_REQUEST"
+      SSESpecification:
+        SSEEnabled: True
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  S3Bucket:
+    Description: "Amazon S3 bucket name"
+    Value: !Select [5, !Split [":", !GetAtt MyFiles.Arn]]
