@@ -9,19 +9,34 @@ Description: >
 Globals:
   Function:
     Timeout: 3
+    
+Parameters:
+  SubnetId01:
+    Type: String
+    Description: Subnet Id 01 for containers
+  SubnetId02:
+    Type: String
+    Description: Subnet Id 02 for containers
+  SecurityGroupId:
+    Type: String
+    Description: Security Group Id for containers
+  MaxSizeLambda:
+    Type: Number
+    Default: 2000000
+    Description: Max size file to be processed by Lambda (bytes)
 
 Resources:
   
   FilesInQueue:
     Type: AWS::SQS::Queue
     Properties:
-      VisibilityTimeout: 300
+      VisibilityTimeout: 900
       QueueName: !Sub '${AWS::StackName}-queue'
       
-  MyFiles:
+  ValidationFiles:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${AWS::StackName}-files'
+      BucketName: !Sub '${AWS::StackName}-validation-files'
       NotificationConfiguration:
         QueueConfigurations:
           - Event: 's3:ObjectCreated:*'
@@ -53,18 +68,25 @@ Resources:
       CodeUri: code/black_lists/
       Handler: lists_validation.lambda_handler
       Runtime: python3.8
-      Tracing: Active
+      #Tracing: Active
       Environment:
         Variables:
           TABLE_JOBS: !Ref Jobs
-          TABLE_BLACK_LIST: !Ref BlackList
-      Timeout: 300
-      MemorySize: 1024
+          TABLE_VALUES: !Ref Values
+          CLUSTER_NAME: !Sub '${AWS::StackName}-cluster'
+          TASK_DEFINITION: !Ref ListValidationTaskDefinition
+          TASK_ROLE_ARN: !GetAtt ListValidationTaskRole.Arn
+          SUBNET_ID_01: !Ref SubnetId01
+          SUBNET_ID_02: !Ref SubnetId02
+          SECURITY_GROUP_ID: !Ref SecurityGroupId
+          MAX_SIZE_LAMBDA: !Ref MaxSizeLambda
+      Timeout: 900
+      MemorySize: 3072
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Jobs
         - DynamoDBCrudPolicy:
-            TableName: !Ref BlackList
+            TableName: !Ref Values
         - AWSLambdaExecute
         - Version: '2012-10-17' 
           Statement:
@@ -73,13 +95,24 @@ Resources:
                 - s3:GetObject
                 - s3:PutObject
                 - s3:GetObjectACL
-              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-files/*'
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-validation-files/*'
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: '*'
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - ecs:*
+                - iam:PassRole
+              Resource: '*'
       Events:
         MySQSEvent:
           Type: SQS
           Properties:
             Queue: !GetAtt FilesInQueue.Arn
-            BatchSize: 5
+            BatchSize: 1
 
   ProcessJobsStatus:
     Type: AWS::Serverless::Function
@@ -93,9 +126,24 @@ Resources:
       Environment:
         Variables:
           TABLE_JOBS: !Ref Jobs
+          BUCKET_NAME: !Sub '${AWS::StackName}-validation-files'
+          EXPIRATION: 3600
+          TOPIC_ARN: !Ref MyTopic
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Jobs
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-validation-files/*'
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: '*'
       Events:
         Stream:
           Type: DynamoDB
@@ -119,23 +167,266 @@ Resources:
       StreamSpecification:
         StreamViewType: NEW_IMAGE
         
-  BlackList:
+  Values:
     Type: AWS::DynamoDB::Table
     Properties:
       AttributeDefinitions:
-      - AttributeName: "number"
+      - AttributeName: "key_name"
         AttributeType: "S"
       KeySchema:
-      - AttributeName: "number"
+      - AttributeName: "key_name"
         KeyType: "HASH"
       BillingMode: "PAY_PER_REQUEST"
       SSESpecification:
         SSEEnabled: True
+        
+        
+  LoadBlackListFilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: code/black_lists/
+      Handler: load_black_lists.lambda_handler
+      Runtime: python3.8
+      Tracing: Active
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Sub '${AWS::StackName}-cluster'
+          TASK_ROLE_ARN: !GetAtt TaskRole.Arn
+          TABLE_VALUES: !Ref Values
+          TASK_DEFINITION: !Ref LoadBlackListTaskDefinition
+          SUBNET_ID_01: !Ref SubnetId01
+          SUBNET_ID_02: !Ref SubnetId02
+          SECURITY_GROUP_ID: !Ref SecurityGroupId
+      Timeout: 900
+      MemorySize: 10240
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Values
+        - AWSLambdaExecute
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:GetObjectACL
+              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-black-lists-files/*'
+        - Version: '2012-10-17' 
+          Statement:
+            - Effect: Allow
+              Action:
+                - ecs:*
+                - iam:PassRole
+              Resource: '*'
+      Events:
+        LoadFileEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref BlackListFiles
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: ".csv"
+        
+  BlackListFiles:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-black-lists-files'
+      
+  MyTopic:
+    Type: 'AWS::SNS::Topic'
+
+  # CLOUDWATCH LOG GROUP
+
+  CloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 365
+
+  # CLUSTER FOR CONTAINERS
+
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+
+  TaskExecutionRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # CONTAINER FOR LOAD BLACK LISTS
+          
+  MyRepository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: "load_black_lists"
+      ImageScanningConfiguration: 
+        ScanOnPush: "true"
+        
+  TaskRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        Policies: 
+          - PolicyName: AccessS3
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectACL
+                  Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-black-lists-files/*'
+          - PolicyName: AccessDynamoDB
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:BatchWriteItem
+                    - dynamodb:CreateTable
+                    - dynamodb:DescribeTable
+                    - dynamodb:UpdateItem
+                    - dynamodb:GetItem
+                  Resource: '*'
+                  
+  LoadBlackListTaskDefinition: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      NetworkMode: 'awsvpc'
+      Cpu: 4096
+      Memory: 16384
+      RequiresCompatibilities:
+        - "FARGATE"
+      ContainerDefinitions: 
+        - 
+          Name: "container"
+          Image: !GetAtt MyRepository.RepositoryUri
+          Cpu: 4096
+          Memory: 16384
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'load_black_lists'
+                  
+  # CONTAINER FOR VALIDATIONS
+          
+  ListValidationRepository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: "lists_validation"
+      ImageScanningConfiguration: 
+        ScanOnPush: "true"
+  
+  ListValidationTaskRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        Policies: 
+          - PolicyName: AccessS3
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:PutObject
+                    - s3:GetObjectACL
+                  Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-validation-files/*'
+          - PolicyName: AccessDynamoDB
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:BatchWriteItem
+                    - dynamodb:CreateTable
+                    - dynamodb:DescribeTable
+                    - dynamodb:GetItem
+                    - dynamodb:UpdateItem
+                  Resource: '*'
+
+  ListValidationTaskDefinition: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      TaskRoleArn: !GetAtt ListValidationTaskRole.Arn
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      NetworkMode: 'awsvpc'
+      Cpu: 4096
+      Memory: 16384
+      RequiresCompatibilities:
+        - "FARGATE"
+      ContainerDefinitions: 
+        - 
+          Name: "container"
+          Image: !GetAtt ListValidationRepository.RepositoryUri
+          Cpu: 4096
+          Memory: 16384
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'lists_validation'
+          
 
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  S3Bucket:
-    Description: "Amazon S3 bucket name"
-    Value: !Select [5, !Split [":", !GetAtt MyFiles.Arn]]
+  S3FilesBucket:
+    Description: "Amazon S3 bucket name - File"
+    Value: !Select [5, !Split [":", !GetAtt ValidationFiles.Arn]]
+  S3BlackListFilesBucket:
+    Description: "Amazon S3 bucket name - Black Lists Files"
+    Value: !Select [5, !Split [":", !GetAtt BlackListFiles.Arn]]

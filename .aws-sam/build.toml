@@ -6,7 +6,7 @@ codeuri = "/home/ec2-user/environment/sam-validation-list/code/black_lists"
 runtime = "python3.8"
 source_md5 = ""
 packagetype = "Zip"
-functions = ["ListValidationFunction"]
+functions = ["ListValidationFunction", "LoadBlackListFilesFunction"]
 
 [function_build_definitions.44d4f132-54f8-41b3-bc19-7782cf166dbb]
 codeuri = "/home/ec2-user/environment/sam-validation-list/code/notifications"
