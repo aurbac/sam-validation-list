@@ -24,6 +24,9 @@ Parameters:
     Type: Number
     Default: 2000000
     Description: Max size file to be processed by Lambda (bytes)
+  SESEmail:
+    Type: String
+    Description: SES Email
 
 Resources:
   
@@ -95,7 +98,9 @@ Resources:
                 - s3:GetObject
                 - s3:PutObject
                 - s3:GetObjectACL
-              Resource: !Sub 'arn:aws:s3:::${AWS::StackName}-validation-files/*'
+              Resource:
+                - !Sub 'arn:aws:s3:::${AWS::StackName}-validation-files/*'
+                - 'arn:aws:s3:::sam-validation-list-validation-files/protected/${cognito-identity.amazonaws.com:sub}/*'
             - Effect: Allow
               Action:
                 - dynamodb:GetItem
@@ -128,7 +133,7 @@ Resources:
           TABLE_JOBS: !Ref Jobs
           BUCKET_NAME: !Sub '${AWS::StackName}-validation-files'
           EXPIRATION: 3600
-          TOPIC_ARN: !Ref MyTopic
+          SES_EMAIL: !Ref SESEmail
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Jobs
@@ -142,7 +147,7 @@ Resources:
           Statement:
             - Effect: Allow
               Action:
-                - sns:Publish
+                - ses:SendEmail
               Resource: '*'
       Events:
         Stream:
@@ -233,9 +238,6 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub '${AWS::StackName}-black-lists-files'
-      
-  MyTopic:
-    Type: 'AWS::SNS::Topic'
 
   # CLOUDWATCH LOG GROUP
 

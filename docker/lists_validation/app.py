@@ -35,7 +35,7 @@ def handler():
             
             # descarga el archivo creado en amazon s3
             response = s3.get_object(Bucket=BUCKET_NAME, Key=OBJECT_KEY)
-            df = pd.read_csv(io.BytesIO(response['Body'].read()), header=None)
+            df = pd.read_csv(io.BytesIO(response['Body'].read()), header=None, delimiter=',')
             #lines = df.to_dict('records')
             #print(lines)
             

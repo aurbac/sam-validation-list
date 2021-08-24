@@ -9,6 +9,7 @@ import pandas as pd
 import io
 import csv
 import datetime
+from urllib.parse import unquote
 
 #patch_all()
 
@@ -50,9 +51,15 @@ def lambda_handler(event, context):
                         print(json.dumps(rec))
                         if rec['eventName']=="ObjectCreated:Put":
                             # extrae los datos del objeto creado en amazon s3
-                            object_key = rec['s3']['object']['key']
+                            object_key = unquote(unquote(rec['s3']['object']['key']))
                             bucket_name = rec['s3']['bucket']['name']
                             
+                            metadata = s3.head_object(Bucket=bucket_name, Key=object_key)
+                            
+                            email = 'no-reply@mail'
+                            if 'Metadata' in metadata and 'email' in metadata['Metadata']:
+                                email = metadata['Metadata']['email']
+                                
                             # valida el tamño del archivo, si es mayor a 1MB es para proceso externo
                             external_process = False
                             if rec['s3']['object']['size']>MAX_SIZE_LAMBDA:
@@ -67,7 +74,8 @@ def lambda_handler(event, context):
                                     'object_size': { 'N': str(rec['s3']['object']['size']) },
                                     'job_status': { 'S': "in_progress" },
                                     'external_process': { 'BOOL': external_process },
-                                    'job_started_at': { 'S': nows.strftime("%Y-%m-%d %H:%M:%S") }
+                                    'job_started_at': { 'S': nows.strftime("%Y-%m-%d %H:%M:%S") },
+                                    'email': { 'S': email }
                                 }
                             )
                             
@@ -111,11 +119,12 @@ def lambda_handler(event, context):
                             else:
                                 print("Lambda process")
                                 # descarga el archivo creado en amazon s3
+                                print(bucket_name)
+                                print(object_key)
                                 response = s3.get_object(Bucket=bucket_name, Key=object_key)
-                                df = pd.read_csv(io.BytesIO(response['Body'].read()), header=None)
+                                df = pd.read_csv(io.BytesIO(response['Body'].read()), header=None, delimiter=',')
                                 #lines = df.to_dict('records')
                                 #print(lines)
-                                
                                 items = []
                                 
                                 for index, row in df.iterrows():

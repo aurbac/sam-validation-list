@@ -14,12 +14,13 @@ patch_all()
 s3 = boto3.client('s3')
 dynamodb = boto3.client('dynamodb')
 sns = boto3.client('sns')
+ses = boto3.client('ses')
 
 def lambda_handler(event, context):
     TABLE_JOBS = os.environ['TABLE_JOBS']
     BUCKET_NAME = os.environ['BUCKET_NAME']
-    EXPIRATION = int(os.environ['EXPIRATION'])
-    TOPIC_ARN = os.environ['TOPIC_ARN']
+    EXPIRATION = int(os.environ['EXPIRATION'])   
+    SES_EMAIL = os.environ['SES_EMAIL']
     #print(json.dumps(event))
     try:
         records = event['Records']
@@ -29,11 +30,28 @@ def lambda_handler(event, context):
                                                     Params={'Bucket': BUCKET_NAME,
                                                             'Key': record['dynamodb']['NewImage']['job_validated_file']['S']},
                                                     ExpiresIn=EXPIRATION)
-                response = sns.publish(
-                    TopicArn=TOPIC_ARN,
-                    Message=url,
-                    Subject='Validated file: '+ record['dynamodb']['NewImage']['job_id']['S']
-                )
+                
+                email = record['dynamodb']['NewImage']['email']['S']
+                
+                if email!='no-reply@mail':
+                    response = ses.send_email(
+                        Source=SES_EMAIL,
+                        Destination={
+                            'ToAddresses': [email]
+                        },
+                        Message={
+                            'Subject': {
+                                'Data': 'Validated file: '+ record['dynamodb']['NewImage']['job_id']['S'],
+                                'Charset': 'utf-8'
+                            },
+                            'Body': {
+                                'Text': {
+                                    'Data': "URL: " + url,
+                                    'Charset': 'utf-8'
+                                }
+                            }
+                        }
+                    )
                 
                 print(response)
                 print("Completed job:")
